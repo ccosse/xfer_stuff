@@ -1,59 +1,47 @@
-#include <rapidxml.hpp>
-#include <rapidxml_print.hpp>
-#include <string>
-#include <string_view>
-#include <functional>
-using namespace rapidxml;
-
-static void replaceAllModelName(xml_document<>& doc,
-                                std::string_view needle = "MyModelName",
-                                std::string_view suffix = "-IC")
+// drop-in
+void replaceOccurancesInTags(rapidxml_sv::xml_document<>& doc,
+                             const std::vector<std::string>& tags,
+                             const char* from, const char* to)
 {
-    const std::string replacement = std::string(needle) + std::string(suffix);
-
-    auto replace_in = [&](std::string& s) {
-        size_t pos = 0;
-        while ((pos = s.find(needle, pos)) != std::string::npos) {
-            // Skip if already "...MyModelName-IC"
-            if (pos + needle.size() + suffix.size() <= s.size() &&
-                s.compare(pos + needle.size(), suffix.size(), suffix) == 0) {
-                pos += needle.size() + suffix.size();
-                continue;
-            }
-            s.replace(pos, needle.size(), replacement);
-            pos += replacement.size();
+    std::unordered_set<std::string> tagset(tags.begin(), tags.end());
+    const auto repl = [&](std::string& s)->bool{
+        bool changed=false;
+        size_t pos=0, flen=std::strlen(from), tlen=std::strlen(to);
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, flen, to);
+            pos += tlen;
+            changed = true;
         }
+        return changed;
     };
-
-    auto patch_value = [&](auto* base /* xml_node<>* or xml_attribute<>* */) {
-        // Build a view from pointer + size; works regardless of return type quirks.
-        std::string_view v{ base->value(), static_cast<size_t>(base->value_size()) };
-        if (v.empty()) return;
-
-        std::string s(v);         // owning buffer to mutate
-        replace_in(s);
-        if (s != v) base->value(doc.allocate_string(s.c_str()));
-    };
-
-    std::function<void(xml_node<>*)> walk = [&](xml_node<>* n) {
+    std::function<void(rapidxml_sv::xml_node<>*)> dfs =
+    [&](rapidxml_sv::xml_node<>* n){
         if (!n) return;
-
-        // Element text in the element itself
-        if (n->value_size() > 0) patch_value(n);
-
-        // Attributes
-        for (auto* a = n->first_attribute(); a; a = a->next_attribute())
-            if (a->value_size() > 0) patch_value(a);
-
-        // Data/CDATA text nodes
-        for (auto* c = n->first_node(); c; c = c->next_sibling())
-            if ((c->type() == node_data || c->type() == node_cdata) && c->value_size() > 0)
-                patch_value(c);
-
-        // Recurse into element children
-        for (auto* c = n->first_node(); c; c = c->next_sibling())
-            if (c->type() == node_element) walk(c);
+        if (tagset.count(std::string(n->name()))) {
+            // node value
+            {
+                std::string oldv = n->value();
+                std::string newv = oldv;
+                if (repl(newv) && newv != oldv) {
+                    std::cout << "node <" << n->name() << ">: \"" << oldv
+                              << "\" -> \"" << newv << "\"\n";
+                    char* nv = doc.allocate_string(newv.c_str());
+                    n->value(nv);
+                }
+            }
+            // attributes
+            for (auto* a = n->first_attribute(); a; a = a->next_attribute()) {
+                std::string olda = a->value();
+                std::string newa = olda;
+                if (repl(newa) && newa != olda) {
+                    std::cout << "attr " << a->name() << " on <" << n->name()
+                              << ">: \"" << olda << "\" -> \"" << newa << "\"\n";
+                    char* nv = doc.allocate_string(newa.c_str());
+                    a->value(nv);
+                }
+            }
+        }
+        for (auto* c = n->first_node(); c; c = c->next_sibling()) dfs(c);
     };
-
-    walk(doc.first_node());
+    dfs(doc.first_node());
 }
