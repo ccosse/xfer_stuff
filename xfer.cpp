@@ -1,25 +1,23 @@
 #include <rapidxml.hpp>
 #include <rapidxml_print.hpp>
 #include <string>
+#include <string_view>
 #include <functional>
 using namespace rapidxml;
 
 static void replaceAllModelName(xml_document<>& doc,
-                                const char* needle_cstr = "MyModelName",
-                                const char* suffix_cstr = "-IC")
+                                std::string_view needle = "MyModelName",
+                                std::string_view suffix = "-IC")
 {
-    const std::string needle(needle_cstr);
-    const std::string replacement = needle + suffix_cstr;
+    const std::string replacement = std::string(needle) + std::string(suffix);
 
     auto replace_in = [&](std::string& s) {
         size_t pos = 0;
         while ((pos = s.find(needle, pos)) != std::string::npos) {
-            // If it’s already "MyModelName-IC", skip this occurrence
-            if (pos + needle.size() + 3 <= s.size() &&
-                s[pos + needle.size()] == '-' &&
-                s[pos + needle.size() + 1] == 'I' &&
-                s[pos + needle.size() + 2] == 'C') {
-                pos += needle.size() + 3;
+            // Skip if already "...MyModelName-IC"
+            if (pos + needle.size() + suffix.size() <= s.size() &&
+                s.compare(pos + needle.size(), suffix.size(), suffix) == 0) {
+                pos += needle.size() + suffix.size();
                 continue;
             }
             s.replace(pos, needle.size(), replacement);
@@ -27,34 +25,30 @@ static void replaceAllModelName(xml_document<>& doc,
         }
     };
 
+    auto patch_value = [&](auto* base /* xml_node<>* or xml_attribute<>* */) {
+        // Build a view from pointer + size; works regardless of return type quirks.
+        std::string_view v{ base->value(), static_cast<size_t>(base->value_size()) };
+        if (v.empty()) return;
+
+        std::string s(v);         // owning buffer to mutate
+        replace_in(s);
+        if (s != v) base->value(doc.allocate_string(s.c_str()));
+    };
+
     std::function<void(xml_node<>*)> walk = [&](xml_node<>* n) {
         if (!n) return;
 
-        // Element’s own text (if any)
-        if (n->value() && *n->value()) {
-            std::string v = n->value();
-            std::string before = v;
-            replace_in(v);
-            if (v != before) n->value(doc.allocate_string(v.c_str()));
-        }
+        // Element text in the element itself
+        if (n->value_size() > 0) patch_value(n);
 
         // Attributes
-        for (auto* a = n->first_attribute(); a; a = a->next_attribute()) {
-            std::string v = a->value();
-            std::string before = v;
-            replace_in(v);
-            if (v != before) a->value(doc.allocate_string(v.c_str()));
-        }
+        for (auto* a = n->first_attribute(); a; a = a->next_attribute())
+            if (a->value_size() > 0) patch_value(a);
 
-        // Data/CDATA children (text nodes)
-        for (auto* c = n->first_node(); c; c = c->next_sibling()) {
-            if (c->type() == node_data || c->type() == node_cdata) {
-                std::string v = c->value();
-                std::string before = v;
-                replace_in(v);
-                if (v != before) c->value(doc.allocate_string(v.c_str()));
-            }
-        }
+        // Data/CDATA text nodes
+        for (auto* c = n->first_node(); c; c = c->next_sibling())
+            if ((c->type() == node_data || c->type() == node_cdata) && c->value_size() > 0)
+                patch_value(c);
 
         // Recurse into element children
         for (auto* c = n->first_node(); c; c = c->next_sibling())
